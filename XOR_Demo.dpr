@@ -49,8 +49,8 @@ type
     
     // Initialize parameters once
     procedure InitializeParams;
-    // Build forward pass (resets activations, keeps params)
-    procedure BuildForward;
+    // Build forward pass with actual data (resets activations, keeps params)
+    procedure BuildForward(const Inputs: TArray<Single>; const Target: Single; IsTraining: Boolean);
   public
     constructor Create(HiddenSize: Integer = 16);
     destructor Destroy; override;
@@ -73,7 +73,7 @@ begin
   FHiddenSize := HiddenSize;
   FGraph := TGraph.Create(256); // 256MB arena
   InitializeParams;  // Allocate params ONCE
-  BuildForward;      // Build initial forward pass
+  // BuildForward is called on first Forward() or TrainStep() with actual data
 end;
 
 destructor TNetwork.Destroy;
@@ -98,41 +98,43 @@ begin
   FGraph.MarkParamsEnd;
 end;
 
-procedure TNetwork.BuildForward;
+procedure TNetwork.BuildForward(const Inputs: TArray<Single>; const Target: Single; IsTraining: Boolean);
 begin
   // Reset only activations, keep parameters intact
-  // This is the key optimization - no more save/restore overhead
   FGraph.ResetActivations;
   
-  // Build computation graph for forward pass
-  // Layer 1: Input(2) -> Hidden(8)
+  // CRITICAL: Create input node and SET DATA IMMEDIATELY before any math ops
   FInputIdx := FGraph.Input([2, 1]);
+  FGraph.SetInputValue(FInputIdx, Inputs);  // Data must be set BEFORE operations use it!
+  
+  // Layer 1: Input(2) -> Hidden(H)
   var H1PreIdx: Integer;
-  H1PreIdx := FGraph.MatMul(FW1Idx, FInputIdx);  // W1 * x
+  H1PreIdx := FGraph.MatMul(FW1Idx, FInputIdx);  // W1 * x (now has actual data)
   var H1BiasIdx: Integer;
   H1BiasIdx := FGraph.Add(H1PreIdx, FB1Idx);     // W1 * x + b1
   FH1Idx := FGraph.LeakyReLU(H1BiasIdx, 0.01);   // LeakyReLU(W1 * x + b1)
   
-  // Layer 2: Hidden(8) -> Output(1)
+  // Layer 2: Hidden(H) -> Output(1)
   var OutPreIdx: Integer;
   OutPreIdx := FGraph.MatMul(FW2Idx, FH1Idx);    // W2 * h1
   var OutBiasIdx: Integer;
   OutBiasIdx := FGraph.Add(OutPreIdx, FB2Idx);   // W2 * h1 + b2
   FOutputIdx := FGraph.Sigmoid(OutBiasIdx);      // Sigmoid(W2 * h1 + b2)
   
-  // Target input (for training) - shape must match output [1, 1]
-  FTargetIdx := FGraph.Input([1, 1]);
+  // Target input (for training only)
+  if IsTraining then
+  begin
+    FTargetIdx := FGraph.Input([1, 1]);
+    FGraph.SetInputValue(FTargetIdx, [Target]);  // Set target data immediately too
+  end;
 end;
 
 function TNetwork.Forward(const Inputs: TArray<Single>): Single;
 begin
-  // Rebuild activations only (params persist)
-  BuildForward;
+  // Build forward pass with actual input data (inference mode)
+  BuildForward(Inputs, 0, False);
   
-  // Set input values
-  FGraph.SetInputValue(FInputIdx, Inputs);
-  
-  // Forward pass is computed during BuildForward
+  // Output is already computed during BuildForward
   Result := FGraph.GetOutputValue(FOutputIdx);
 end;
 
@@ -140,14 +142,10 @@ function TNetwork.TrainStep(const Inputs: TArray<Single>; Target: Single; Learni
 var
   LossValue: Single;
 begin
-  // Reset activations only - params stay in place
-  BuildForward;
+  // Build forward pass with actual input AND target data (training mode)
+  BuildForward(Inputs, Target, True);
   
-  // Set input and target values
-  FGraph.SetInputValue(FInputIdx, Inputs);
-  FGraph.SetInputValue(FTargetIdx, [Target]);
-  
-  // Compute loss
+  // Compute loss (output and target are already set with real data)
   FLossIdx := FGraph.MSE(FOutputIdx, FTargetIdx);
   LossValue := FGraph.GetOutputValue(FLossIdx);
   
@@ -157,7 +155,7 @@ begin
   // Backward pass
   FGraph.Backward(FLossIdx);
   
-  // Update parameters (they persist in the arena)
+  // Update parameters
   FGraph.Step(LearningRate, GradClip);
   
   Result := LossValue;
@@ -167,7 +165,7 @@ procedure TNetwork.Reset;
 begin
   // Full reset: reinitialize parameters with new random values
   InitializeParams;
-  BuildForward;
+  // BuildForward is called on next Forward() or TrainStep() with actual data
 end;
 
 { ============================================================================
@@ -480,6 +478,7 @@ procedure TMainForm.TrainEpoch;
 var
   i: Integer;
   TotalLoss, Loss: Single;
+  Pred: array[0..3] of Single;
 begin
   TotalLoss := 0;
   for i := 0 to 3 do
@@ -488,8 +487,15 @@ begin
     TotalLoss := TotalLoss + Loss;
   end;
   Inc(EpochCount);
+  
+  // Debug: check what network predicts for each corner
+  for i := 0 to 3 do
+    Pred[i] := Network.Forward(X[i]);
+  
   LblEpoch.Caption := 'Epoch: ' + IntToStr(EpochCount);
-  LblLoss.Caption := 'Loss: ' + FloatToStrF(TotalLoss / 4, ffFixed, 4, 5);
+  // Show predictions in loss label for debugging
+  LblLoss.Caption := Format('L:%.4f [%.2f,%.2f,%.2f,%.2f]', 
+    [TotalLoss / 4, Pred[0], Pred[1], Pred[2], Pred[3]]);
 end;
 
 procedure TMainForm.RenderBrain;
@@ -498,15 +504,19 @@ var
   Inputs: TArray<Single>;
   Val: Single;
   Row: PRGBQuad;
+  MaxX, MaxY: Integer;
 begin
   SetLength(Inputs, 2);
-  for yy := 0 to Buffer.Height - 1 do
+  MaxX := Buffer.Width - 1;
+  MaxY := Buffer.Height - 1;
+  for yy := 0 to MaxY do
   begin
     Row := Buffer.ScanLine[yy];
-    for xx := 0 to Buffer.Width - 1 do
+    for xx := 0 to MaxX do
     begin
-      Inputs[0] := xx / Buffer.Width;
-      Inputs[1] := yy / Buffer.Height;
+      // Map to [0,1] range so corners hit exactly 0.0 and 1.0
+      Inputs[0] := xx / MaxX;
+      Inputs[1] := yy / MaxY;
       Val := Network.Forward(Inputs);
       if Val < 0 then
         Val := 0;
