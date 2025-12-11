@@ -1,0 +1,60 @@
+# Delphi compiled units
+*.dcu
+*.exe
+*.dll
+*.bpl
+*.bpi
+*.dcp
+*.so
+*.apk
+*.drc
+*.map
+*.dres
+*.rsm
+*.tds
+*.dcu
+*.lib
+*.a
+*.o
+*.ocx
+
+# Delphi project local files
+*.local
+*.identcache
+*.projdata
+*.tvsconfig
+*.dsk
+
+# Delphi backup files
+*.~*
+*.__history
+__history/
+__recovery/
+
+# Build output directories
+Win32/
+Win64/
+OSX32/
+OSX64/
+OSXARM64/
+Android/
+Android64/
+iOSDevice32/
+iOSDevice64/
+iOSSimulator/
+iOSSimARM64/
+Linux64/
+
+# IDE files
+*.stat
+*.~bpk
+*.~dpr
+*.~pas
+
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
+desktop.ini
+
