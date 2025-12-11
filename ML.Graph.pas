@@ -65,8 +65,8 @@ type
     procedure ResetActivations;
     
     // Forward building - returns node index
-    function Input(Rows, Cols: Integer): Integer;
-    function Param(Rows, Cols: Integer): Integer;
+    function Input(const AShape: array of Integer): Integer;
+    function Param(const AShape: array of Integer): Integer;
     function Add(A, B: Integer): Integer;
     function Mul(A, B: Integer): Integer;
     function MatMul(A, B: Integer): Integer;
@@ -97,6 +97,21 @@ type
   end;
 
 implementation
+
+// Helper to create tensor with same shape as another
+function CreateTensorSameShape(Arena: TArena; const Source: TTensor;
+  RequiresGrad: Boolean): TTensor;
+var
+  i: Integer;
+begin
+  SetLength(Result.Shape, Length(Source.Shape));
+  for i := 0 to High(Source.Shape) do
+    Result.Shape[i] := Source.Shape[i];
+  Result.Strides := ComputeStrides(Result.Shape);
+  Result.DataPtr := Arena.Alloc(Result.ElementCount);
+  Result.GradPtr := -1;
+  Result.RequiresGrad := RequiresGrad;
+end;
 
 constructor TGraph.Create(ArenaSizeMB: Integer);
 begin
@@ -177,34 +192,38 @@ begin
   FNodeCount := FParamNodeCount;
 end;
 
-function TGraph.Input(Rows, Cols: Integer): Integer;
+function TGraph.Input(const AShape: array of Integer): Integer;
 var
   Node: TNode;
 begin
   Node.Op := opInput;
-  Node.Result := TTensor.CreateTensor(FArena, Rows, Cols, False);
+  Node.Result := TTensor.Create(FArena, AShape, False);
   Node.ParentCount := 0;
   Node.RequiresGrad := False;
   Result := AddNode(Node);
 end;
 
-function TGraph.Param(Rows, Cols: Integer): Integer;
+function TGraph.Param(const AShape: array of Integer): Integer;
 var
   Node: TNode;
   PData, PGrad: PSingleArray;
-  i, Count: Integer;
+  i, Count, TotalDims: Integer;
   Scale: Single;
 begin
   Node.Op := opParam;
-  Node.Result := TTensor.CreateTensor(FArena, Rows, Cols, True);
+  Node.Result := TTensor.Create(FArena, AShape, True);
   Node.ParentCount := 0;
   Node.RequiresGrad := True;
   
   Count := Node.Result.ElementCount;
   
   // Initialize with random values (Xavier initialization)
+  // For N-D: use sum of all dimensions
   PData := PSingleArray(Node.Result.RawData(FArena));
-  Scale := Sqrt(2.0 / (Rows + Cols));
+  TotalDims := 0;
+  for i := 0 to High(AShape) do
+    TotalDims := TotalDims + AShape[i];
+  Scale := Sqrt(2.0 / TotalDims);
   for i := 0 to Count - 1 do
     PData^[i] := (Random * 2.0 - 1.0) * Scale;
   
@@ -222,6 +241,7 @@ function TGraph.Add(A, B: Integer): Integer;
 var
   Node: TNode;
   TensorA, TensorB: TTensor;
+  i: Integer;
 begin
   TensorA := FNodes[A].Result;
   TensorB := FNodes[B].Result;
@@ -230,8 +250,15 @@ begin
     raise Exception.Create('Add: Shape mismatch');
   
   Node.Op := opAdd;
-  Node.Result := TTensor.CreateTensor(FArena, TensorA.Rows, TensorA.Cols, 
-    FNodes[A].RequiresGrad or FNodes[B].RequiresGrad);
+  // Create output with same shape as inputs
+  SetLength(Node.Result.Shape, Length(TensorA.Shape));
+  for i := 0 to High(TensorA.Shape) do
+    Node.Result.Shape[i] := TensorA.Shape[i];
+  Node.Result.Strides := ComputeStrides(Node.Result.Shape);
+  Node.Result.DataPtr := FArena.Alloc(Node.Result.ElementCount);
+  Node.Result.GradPtr := -1;
+  Node.Result.RequiresGrad := FNodes[A].RequiresGrad or FNodes[B].RequiresGrad;
+  
   Node.Parents[0] := A;
   Node.Parents[1] := B;
   Node.ParentCount := 2;
@@ -245,6 +272,7 @@ function TGraph.Mul(A, B: Integer): Integer;
 var
   Node: TNode;
   TensorA, TensorB: TTensor;
+  i: Integer;
 begin
   TensorA := FNodes[A].Result;
   TensorB := FNodes[B].Result;
@@ -253,8 +281,15 @@ begin
     raise Exception.Create('Mul: Shape mismatch');
   
   Node.Op := opMul;
-  Node.Result := TTensor.CreateTensor(FArena, TensorA.Rows, TensorA.Cols, 
-    FNodes[A].RequiresGrad or FNodes[B].RequiresGrad);
+  // Create output with same shape as inputs
+  SetLength(Node.Result.Shape, Length(TensorA.Shape));
+  for i := 0 to High(TensorA.Shape) do
+    Node.Result.Shape[i] := TensorA.Shape[i];
+  Node.Result.Strides := ComputeStrides(Node.Result.Shape);
+  Node.Result.DataPtr := FArena.Alloc(Node.Result.ElementCount);
+  Node.Result.GradPtr := -1;
+  Node.Result.RequiresGrad := FNodes[A].RequiresGrad or FNodes[B].RequiresGrad;
+  
   Node.Parents[0] := A;
   Node.Parents[1] := B;
   Node.ParentCount := 2;
@@ -268,17 +303,44 @@ function TGraph.MatMul(A, B: Integer): Integer;
 var
   Node: TNode;
   TensorA, TensorB: TTensor;
+  ANdim, BNdim: Integer;
+  OutShape: TArray<Integer>;
+  i: Integer;
 begin
   TensorA := FNodes[A].Result;
   TensorB := FNodes[B].Result;
   
-  if TensorA.Cols <> TensorB.Rows then
-    raise Exception.CreateFmt('MatMul: Dimension mismatch (%d x %d) * (%d x %d)', 
-      [TensorA.Rows, TensorA.Cols, TensorB.Rows, TensorB.Cols]);
+  ANdim := TensorA.NDim;
+  BNdim := TensorB.NDim;
   
-  Node.Op := opMatMul;
-  Node.Result := TTensor.CreateTensor(FArena, TensorA.Rows, TensorB.Cols, 
-    FNodes[A].RequiresGrad or FNodes[B].RequiresGrad);
+  if (ANdim < 2) or (BNdim < 2) then
+    raise Exception.Create('MatMul: Tensors must have at least 2 dimensions');
+  
+  // Check inner dimensions match
+  if TensorA.Shape[ANdim - 1] <> TensorB.Shape[BNdim - 2] then
+    raise Exception.CreateFmt('MatMul: Inner dimension mismatch: %d != %d',
+      [TensorA.Shape[ANdim - 1], TensorB.Shape[BNdim - 2]]);
+  
+  // For 2D case: [M, K] @ [K, N] -> [M, N]
+  if (ANdim = 2) and (BNdim = 2) then
+  begin
+    SetLength(OutShape, 2);
+    OutShape[0] := TensorA.Shape[0];
+    OutShape[1] := TensorB.Shape[1];
+    
+    Node.Op := opMatMul;
+    // Create tensor manually since we can't pass dynamic array to open array directly
+    SetLength(Node.Result.Shape, 2);
+    Node.Result.Shape[0] := OutShape[0];
+    Node.Result.Shape[1] := OutShape[1];
+    Node.Result.Strides := ComputeStrides(Node.Result.Shape);
+    Node.Result.DataPtr := FArena.Alloc(Node.Result.ElementCount);
+    Node.Result.GradPtr := -1;
+    Node.Result.RequiresGrad := FNodes[A].RequiresGrad or FNodes[B].RequiresGrad;
+  end
+  else
+    raise Exception.Create('MatMul: Batched N-D tensors (3D+) not yet implemented');
+  
   Node.Parents[0] := A;
   Node.Parents[1] := B;
   Node.ParentCount := 2;
@@ -296,8 +358,7 @@ begin
   TensorA := FNodes[A].Result;
   
   Node.Op := opReLU;
-  Node.Result := TTensor.CreateTensor(FArena, TensorA.Rows, TensorA.Cols, 
-    FNodes[A].RequiresGrad);
+  Node.Result := CreateTensorSameShape(FArena, TensorA, FNodes[A].RequiresGrad);
   Node.Parents[0] := A;
   Node.ParentCount := 1;
   Node.RequiresGrad := Node.Result.RequiresGrad;
@@ -314,8 +375,7 @@ begin
   TensorA := FNodes[A].Result;
   
   Node.Op := opLeakyReLU;
-  Node.Result := TTensor.CreateTensor(FArena, TensorA.Rows, TensorA.Cols, 
-    FNodes[A].RequiresGrad);
+  Node.Result := CreateTensorSameShape(FArena, TensorA, FNodes[A].RequiresGrad);
   Node.Parents[0] := A;
   Node.ParentCount := 1;
   Node.RequiresGrad := Node.Result.RequiresGrad;
@@ -332,8 +392,7 @@ begin
   TensorA := FNodes[A].Result;
   
   Node.Op := opSigmoid;
-  Node.Result := TTensor.CreateTensor(FArena, TensorA.Rows, TensorA.Cols, 
-    FNodes[A].RequiresGrad);
+  Node.Result := CreateTensorSameShape(FArena, TensorA, FNodes[A].RequiresGrad);
   Node.Parents[0] := A;
   Node.ParentCount := 1;
   Node.RequiresGrad := Node.Result.RequiresGrad;
@@ -350,8 +409,7 @@ begin
   TensorA := FNodes[A].Result;
   
   Node.Op := opTanh;
-  Node.Result := TTensor.CreateTensor(FArena, TensorA.Rows, TensorA.Cols, 
-    FNodes[A].RequiresGrad);
+  Node.Result := CreateTensorSameShape(FArena, TensorA, FNodes[A].RequiresGrad);
   Node.Parents[0] := A;
   Node.ParentCount := 1;
   Node.RequiresGrad := Node.Result.RequiresGrad;
@@ -368,8 +426,7 @@ begin
   TensorA := FNodes[A].Result;
   
   Node.Op := opSoftmax;
-  Node.Result := TTensor.CreateTensor(FArena, TensorA.Rows, TensorA.Cols, 
-    FNodes[A].RequiresGrad);
+  Node.Result := CreateTensorSameShape(FArena, TensorA, FNodes[A].RequiresGrad);
   Node.Parents[0] := A;
   Node.ParentCount := 1;
   Node.RequiresGrad := Node.Result.RequiresGrad;
@@ -394,8 +451,7 @@ begin
   
   // Create a scalar tensor for the loss
   Node.Op := opMSE;
-  Node.Result := TTensor.CreateTensor(FArena, 1, 1, 
-    FNodes[Pred].RequiresGrad or FNodes[Target].RequiresGrad);
+  Node.Result := TTensor.Create(FArena, [1], FNodes[Pred].RequiresGrad or FNodes[Target].RequiresGrad);
   Node.Parents[0] := Pred;
   Node.Parents[1] := Target;
   Node.ParentCount := 2;
@@ -425,8 +481,7 @@ begin
   
   // Create a scalar tensor for the loss
   Node.Op := opCrossEntropy;
-  Node.Result := TTensor.CreateTensor(FArena, 1, 1, 
-    FNodes[Pred].RequiresGrad or FNodes[Target].RequiresGrad);
+  Node.Result := TTensor.Create(FArena, [1], FNodes[Pred].RequiresGrad or FNodes[Target].RequiresGrad);
   Node.Parents[0] := Pred;
   Node.Parents[1] := Target;
   Node.ParentCount := 2;

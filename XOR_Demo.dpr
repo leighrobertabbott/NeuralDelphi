@@ -85,10 +85,10 @@ begin
   FGraph.Reset;
   
   // Allocate parameters (weights and biases) - these persist
-  FW1Idx := FGraph.Param(8, 2);  // 8x2 weight matrix
-  FB1Idx := FGraph.Param(8, 1);  // 8x1 bias vector
-  FW2Idx := FGraph.Param(1, 8);  // 1x8 weight matrix
-  FB2Idx := FGraph.Param(1, 1);  // 1x1 bias scalar
+  FW1Idx := FGraph.Param([8, 2]);  // 8x2 weight matrix
+  FB1Idx := FGraph.Param([8, 1]);  // 8x1 bias vector
+  FW2Idx := FGraph.Param([1, 8]);  // 1x8 weight matrix
+  FB2Idx := FGraph.Param([1, 1]);  // 1x1 bias scalar
   
   // Mark the boundary: everything before this is persistent
   FGraph.MarkParamsEnd;
@@ -102,7 +102,7 @@ begin
   
   // Build computation graph for forward pass
   // Layer 1: Input(2) -> Hidden(8)
-  FInputIdx := FGraph.Input(2, 1);
+  FInputIdx := FGraph.Input([2, 1]);
   var H1PreIdx: Integer;
   H1PreIdx := FGraph.MatMul(FW1Idx, FInputIdx);  // W1 * x
   var H1BiasIdx: Integer;
@@ -116,8 +116,8 @@ begin
   OutBiasIdx := FGraph.Add(OutPreIdx, FB2Idx);   // W2 * h1 + b2
   FOutputIdx := FGraph.Sigmoid(OutBiasIdx);      // Sigmoid(W2 * h1 + b2)
   
-  // Target input (for training)
-  FTargetIdx := FGraph.Input(1, 1);
+  // Target input (for training) - shape must match output [1, 1]
+  FTargetIdx := FGraph.Input([1, 1]);
 end;
 
 function TNetwork.Forward(const Inputs: TArray<Single>): Single;
