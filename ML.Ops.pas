@@ -349,7 +349,6 @@ begin
       for ColB := 0 to BCols - 1 do
       begin
         PtrBT := @PBT^[ColB * BRows];  // Row of BT = Column of B
-        // Call the SIMD kernel!
         POut^[RowA * BCols + ColB] := TKernels.DotProduct(PtrA, PtrBT, ACols);
       end;
     end);
@@ -771,9 +770,9 @@ var
   i, Count: Integer;
   LossGrad: Single;
 begin
-  // The beauty of combined Softmax + CrossEntropy:
-  // Gradient = Softmax(x) - Target (that's it!)
-  // No Jacobian needed, numerically stable, fast
+  // Combined Softmax + CrossEntropy gradient:
+  // Gradient = Softmax(x) - Target
+  // Numerically stable, no Jacobian matrix required
   Count := SoftmaxOut.ElementCount;
   if Count = 0 then Exit;
   if (OutGrad.GradPtr < 0) or (AGrad.GradPtr < 0) then Exit;

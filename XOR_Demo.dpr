@@ -84,7 +84,7 @@ begin
   // Full reset to start fresh
   FGraph.Reset;
   
-  // Allocate parameters (weights and biases) - these persist!
+  // Allocate parameters (weights and biases) - these persist
   FW1Idx := FGraph.Param(8, 2);  // 8x2 weight matrix
   FB1Idx := FGraph.Param(8, 1);  // 8x1 bias vector
   FW2Idx := FGraph.Param(1, 8);  // 1x8 weight matrix
@@ -96,7 +96,7 @@ end;
 
 procedure TNetwork.BuildForward;
 begin
-  // Reset only activations, keep parameters intact!
+  // Reset only activations, keep parameters intact
   // This is the key optimization - no more save/restore overhead
   FGraph.ResetActivations;
   
@@ -122,7 +122,7 @@ end;
 
 function TNetwork.Forward(const Inputs: TArray<Single>): Single;
 begin
-  // Rebuild activations only (params persist!)
+  // Rebuild activations only (params persist)
   BuildForward;
   
   // Set input values
@@ -136,7 +136,7 @@ function TNetwork.TrainStep(const Inputs: TArray<Single>; Target: Single; Learni
 var
   LossValue: Single;
 begin
-  // Reset activations only - params stay in place!
+  // Reset activations only - params stay in place
   BuildForward;
   
   // Set input and target values
@@ -147,13 +147,13 @@ begin
   FLossIdx := FGraph.MSE(FOutputIdx, FTargetIdx);
   LossValue := FGraph.GetOutputValue(FLossIdx);
   
-  // Zero gradients for params (they persist and accumulate!)
+  // Zero gradients for params (they persist and accumulate)
   FGraph.ZeroGrad;
   
   // Backward pass
   FGraph.Backward(FLossIdx);
   
-  // Update parameters (they persist in the arena!)
+  // Update parameters (they persist in the arena)
   FGraph.Step(LearningRate);
   
   Result := LossValue;

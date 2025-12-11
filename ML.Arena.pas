@@ -76,7 +76,7 @@ end;
 
 procedure TArena.Reset;
 begin
-  FHead := 0; // The fastest garbage collector in the world
+  FHead := 0;
 end;
 
 function TArena.GetSavePoint: Integer;

@@ -172,7 +172,7 @@ end;
 procedure TGraph.ResetActivations;
 begin
   // Reset only activations, keep parameters intact
-  // This is MUCH faster than full Reset + SaveParameters + RestoreParameters
+  // More efficient than full Reset + SaveParameters + RestoreParameters
   FArena.Restore(FParamSavePoint);
   FNodeCount := FParamNodeCount;
 end;
@@ -208,7 +208,7 @@ begin
   for i := 0 to Count - 1 do
     PData^[i] := (Random * 2.0 - 1.0) * Scale;
   
-  // PRE-ALLOCATE GRADIENTS for params so they persist across ResetActivations!
+  // Pre-allocate gradients for params so they persist across ResetActivations
   // This is critical: gradients must be allocated BEFORE MarkParamsEnd()
   Node.Result.GradPtr := FArena.Alloc(Count);
   PGrad := PSingleArray(FArena.GetPtr(Node.Result.GradPtr));
