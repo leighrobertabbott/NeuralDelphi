@@ -82,7 +82,7 @@ type
     procedure Backward(LossNode: Integer);
     
     // Optimizer
-    procedure Step(LearningRate: Single);
+    procedure Step(LearningRate: Single; GradClip: Single = 5.0);
     procedure ZeroGrad;
     
     // Access
@@ -241,19 +241,24 @@ function TGraph.Add(A, B: Integer): Integer;
 var
   Node: TNode;
   TensorA, TensorB: TTensor;
+  OutShape: TArray<Integer>;
   i: Integer;
 begin
   TensorA := FNodes[A].Result;
   TensorB := FNodes[B].Result;
   
-  if not TensorA.SameShape(TensorB) then
-    raise Exception.Create('Add: Shape mismatch');
+  // Check if shapes are broadcastable
+  if not CanBroadcast(TensorA.Shape, TensorB.Shape) then
+    raise Exception.Create('Add: Shapes are not broadcastable');
+  
+  // Compute broadcast output shape
+  OutShape := BroadcastShapes(TensorA.Shape, TensorB.Shape);
   
   Node.Op := opAdd;
-  // Create output with same shape as inputs
-  SetLength(Node.Result.Shape, Length(TensorA.Shape));
-  for i := 0 to High(TensorA.Shape) do
-    Node.Result.Shape[i] := TensorA.Shape[i];
+  // Create output with broadcast shape
+  SetLength(Node.Result.Shape, Length(OutShape));
+  for i := 0 to High(OutShape) do
+    Node.Result.Shape[i] := OutShape[i];
   Node.Result.Strides := ComputeStrides(Node.Result.Shape);
   Node.Result.DataPtr := FArena.Alloc(Node.Result.ElementCount);
   Node.Result.GradPtr := -1;
@@ -272,19 +277,24 @@ function TGraph.Mul(A, B: Integer): Integer;
 var
   Node: TNode;
   TensorA, TensorB: TTensor;
+  OutShape: TArray<Integer>;
   i: Integer;
 begin
   TensorA := FNodes[A].Result;
   TensorB := FNodes[B].Result;
   
-  if not TensorA.SameShape(TensorB) then
-    raise Exception.Create('Mul: Shape mismatch');
+  // Check if shapes are broadcastable
+  if not CanBroadcast(TensorA.Shape, TensorB.Shape) then
+    raise Exception.Create('Mul: Shapes are not broadcastable');
+  
+  // Compute broadcast output shape
+  OutShape := BroadcastShapes(TensorA.Shape, TensorB.Shape);
   
   Node.Op := opMul;
-  // Create output with same shape as inputs
-  SetLength(Node.Result.Shape, Length(TensorA.Shape));
-  for i := 0 to High(TensorA.Shape) do
-    Node.Result.Shape[i] := TensorA.Shape[i];
+  // Create output with broadcast shape
+  SetLength(Node.Result.Shape, Length(OutShape));
+  for i := 0 to High(OutShape) do
+    Node.Result.Shape[i] := OutShape[i];
   Node.Result.Strides := ComputeStrides(Node.Result.Shape);
   Node.Result.DataPtr := FArena.Alloc(Node.Result.ElementCount);
   Node.Result.GradPtr := -1;
@@ -303,7 +313,7 @@ function TGraph.MatMul(A, B: Integer): Integer;
 var
   Node: TNode;
   TensorA, TensorB: TTensor;
-  ANdim, BNdim: Integer;
+  ANdim, BNdim, OutNdim: Integer;
   OutShape: TArray<Integer>;
   i: Integer;
 begin
@@ -316,30 +326,45 @@ begin
   if (ANdim < 2) or (BNdim < 2) then
     raise Exception.Create('MatMul: Tensors must have at least 2 dimensions');
   
-  // Check inner dimensions match
+  // Check inner dimensions match: A[..., M, K] @ B[..., K, N]
   if TensorA.Shape[ANdim - 1] <> TensorB.Shape[BNdim - 2] then
     raise Exception.CreateFmt('MatMul: Inner dimension mismatch: %d != %d',
       [TensorA.Shape[ANdim - 1], TensorB.Shape[BNdim - 2]]);
   
-  // For 2D case: [M, K] @ [K, N] -> [M, N]
-  if (ANdim = 2) and (BNdim = 2) then
+  // For N-D tensors, batch dimensions must match
+  if (ANdim > 2) or (BNdim > 2) then
   begin
-    SetLength(OutShape, 2);
-    OutShape[0] := TensorA.Shape[0];
-    OutShape[1] := TensorB.Shape[1];
+    // Both must have same number of dimensions for batched matmul
+    if ANdim <> BNdim then
+      raise Exception.Create('MatMul: Batch dimension count must match for N-D tensors');
     
-    Node.Op := opMatMul;
-    // Create tensor manually since we can't pass dynamic array to open array directly
-    SetLength(Node.Result.Shape, 2);
-    Node.Result.Shape[0] := OutShape[0];
-    Node.Result.Shape[1] := OutShape[1];
-    Node.Result.Strides := ComputeStrides(Node.Result.Shape);
-    Node.Result.DataPtr := FArena.Alloc(Node.Result.ElementCount);
-    Node.Result.GradPtr := -1;
-    Node.Result.RequiresGrad := FNodes[A].RequiresGrad or FNodes[B].RequiresGrad;
-  end
-  else
-    raise Exception.Create('MatMul: Batched N-D tensors (3D+) not yet implemented');
+    // Check all batch dimensions match
+    for i := 0 to ANdim - 3 do
+      if TensorA.Shape[i] <> TensorB.Shape[i] then
+        raise Exception.CreateFmt('MatMul: Batch dimension %d mismatch: %d vs %d',
+          [i, TensorA.Shape[i], TensorB.Shape[i]]);
+  end;
+  
+  // Compute output shape: [batch..., M, N]
+  OutNdim := ANdim;
+  SetLength(OutShape, OutNdim);
+  
+  // Copy batch dimensions from A
+  for i := 0 to OutNdim - 3 do
+    OutShape[i] := TensorA.Shape[i];
+  
+  // Last two dimensions: M from A, N from B
+  OutShape[OutNdim - 2] := TensorA.Shape[ANdim - 2];  // M
+  OutShape[OutNdim - 1] := TensorB.Shape[BNdim - 1];  // N
+  
+  Node.Op := opMatMul;
+  SetLength(Node.Result.Shape, OutNdim);
+  for i := 0 to OutNdim - 1 do
+    Node.Result.Shape[i] := OutShape[i];
+  Node.Result.Strides := ComputeStrides(Node.Result.Shape);
+  Node.Result.DataPtr := FArena.Alloc(Node.Result.ElementCount);
+  Node.Result.GradPtr := -1;
+  Node.Result.RequiresGrad := FNodes[A].RequiresGrad or FNodes[B].RequiresGrad;
   
   Node.Parents[0] := A;
   Node.Parents[1] := B;
@@ -750,12 +775,16 @@ begin
   end;
 end;
 
-procedure TGraph.Step(LearningRate: Single);
+procedure TGraph.Step(LearningRate: Single; GradClip: Single);
 var
   i, j: Integer;
   Node: TNode;
   PData, PGrad: PSingleArray;
+  ClippedGrad: Single;
+  MaxGradNorm: Single;
 begin
+  MaxGradNorm := GradClip; // Clip gradients to prevent exploding gradients
+  
   // Update all parameters (opParam nodes) using their gradients
   for i := 0 to FNodeCount - 1 do
   begin
@@ -771,9 +800,19 @@ begin
         PData := PSingleArray(Node.Result.RawData(FArena));
         PGrad := PSingleArray(Node.Result.RawGrad(FArena));
         
-        // Gradient descent: param = param - lr * grad
+        // Gradient descent with clipping: param = param - lr * clip(grad)
         for j := 0 to Node.Result.ElementCount - 1 do
-          PData^[j] := PData^[j] - (LearningRate * PGrad^[j]);
+        begin
+          // Clip gradient to prevent exploding gradients
+          if PGrad^[j] > MaxGradNorm then
+            ClippedGrad := MaxGradNorm
+          else if PGrad^[j] < -MaxGradNorm then
+            ClippedGrad := -MaxGradNorm
+          else
+            ClippedGrad := PGrad^[j];
+          
+          PData^[j] := PData^[j] - (LearningRate * ClippedGrad);
+        end;
       end;
     end;
   end;

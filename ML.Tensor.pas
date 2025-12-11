@@ -43,7 +43,13 @@ type
       ARequiresGrad: Boolean = False): TTensor; static;
   end;
 
+// Stride computation
 function ComputeStrides(const Shape: array of Integer): TArray<Integer>;
+
+// Broadcasting utilities
+function CanBroadcast(const ShapeA, ShapeB: TArray<Integer>): Boolean;
+function BroadcastShapes(const ShapeA, ShapeB: TArray<Integer>): TArray<Integer>;
+function BroadcastIndex(const OutIdx: Integer; const OutShape, InShape, InStrides: TArray<Integer>): Integer;
 
 implementation
 
@@ -333,6 +339,115 @@ begin
     Result.Shape[i] := AShape[i];
     
   Result.Strides := ComputeStrides(Result.Shape);
+end;
+
+// ============================================================================
+// BROADCASTING UTILITIES
+// ============================================================================
+
+function CanBroadcast(const ShapeA, ShapeB: TArray<Integer>): Boolean;
+var
+  i, DimA, DimB: Integer;
+  MaxDim: Integer;
+begin
+  // Two shapes are broadcastable if for each dimension (from right to left):
+  // - They are equal, OR
+  // - One of them is 1
+  MaxDim := Length(ShapeA);
+  if Length(ShapeB) > MaxDim then MaxDim := Length(ShapeB);
+  
+  for i := 1 to MaxDim do
+  begin
+    // Get dimension from right (1-indexed from right)
+    if i <= Length(ShapeA) then
+      DimA := ShapeA[Length(ShapeA) - i]
+    else
+      DimA := 1;
+      
+    if i <= Length(ShapeB) then
+      DimB := ShapeB[Length(ShapeB) - i]
+    else
+      DimB := 1;
+    
+    // Check broadcast compatibility
+    if (DimA <> DimB) and (DimA <> 1) and (DimB <> 1) then
+      Exit(False);
+  end;
+  
+  Result := True;
+end;
+
+function BroadcastShapes(const ShapeA, ShapeB: TArray<Integer>): TArray<Integer>;
+var
+  i, DimA, DimB: Integer;
+  MaxDim: Integer;
+begin
+  // Compute output shape for broadcasting
+  // Result has max(len(ShapeA), len(ShapeB)) dimensions
+  // Each dimension is max(DimA, DimB) where missing dims are treated as 1
+  MaxDim := Length(ShapeA);
+  if Length(ShapeB) > MaxDim then MaxDim := Length(ShapeB);
+  
+  SetLength(Result, MaxDim);
+  
+  for i := 1 to MaxDim do
+  begin
+    if i <= Length(ShapeA) then
+      DimA := ShapeA[Length(ShapeA) - i]
+    else
+      DimA := 1;
+      
+    if i <= Length(ShapeB) then
+      DimB := ShapeB[Length(ShapeB) - i]
+    else
+      DimB := 1;
+    
+    // Output dimension is max of both (one must be 1 or they must be equal)
+    if DimA > DimB then
+      Result[MaxDim - i] := DimA
+    else
+      Result[MaxDim - i] := DimB;
+  end;
+end;
+
+function BroadcastIndex(const OutIdx: Integer; const OutShape, InShape, InStrides: TArray<Integer>): Integer;
+var
+  i, Coord, InDim, OutDim: Integer;
+  Remaining: Integer;
+  OutStrides: TArray<Integer>;
+  DimOffset: Integer;
+begin
+  // Convert linear output index to linear input index with broadcasting
+  // If input dimension is 1, that coordinate contributes 0 to the index (broadcast)
+  
+  // Compute output strides
+  OutStrides := ComputeStrides(OutShape);
+  
+  // Offset for aligning shapes from right
+  DimOffset := Length(OutShape) - Length(InShape);
+  
+  Result := 0;
+  Remaining := OutIdx;
+  
+  for i := 0 to High(OutShape) do
+  begin
+    OutDim := OutShape[i];
+    if OutDim > 0 then
+      Coord := Remaining div OutStrides[i]
+    else
+      Coord := 0;
+    Remaining := Remaining mod OutStrides[i];
+    
+    // Map to input dimension
+    if i >= DimOffset then
+    begin
+      InDim := InShape[i - DimOffset];
+      // If input dimension is 1, use index 0 (broadcasting)
+      if InDim = 1 then
+        Coord := 0;
+      Result := Result + Coord * InStrides[i - DimOffset];
+    end;
+  end;
 end;
 
 end.

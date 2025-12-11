@@ -314,11 +314,13 @@ end;
 class procedure TOps.MatMul(Arena: TArena; const A, B: TTensor; var OutT: TTensor);
 var
   PA, PB, POut, PBT: PSingleArray;
+  PABatch, PBBatch, POutBatch: PSingle;
   ARows, ACols, BRows, BCols: Integer;
   SavePoint: Integer;
   TempPtr: TMemPtr;
   ANdim, BNdim: Integer;
-  i: Integer;
+  i, BatchIdx, BatchSize: Integer;
+  MatrixSizeA, MatrixSizeB, MatrixSizeOut: Integer;
 begin
   ANdim := A.NDim;
   BNdim := B.NDim;
@@ -353,66 +355,112 @@ begin
     raise Exception.CreateFmt('MatMul: Inner dimension mismatch: %d != %d',
       [ACols, BRows]);
   
-  // For now, handle 2D case (simple)
-  // TODO: Add batched 3D+ support with proper indexing
-  if (ANdim = 2) and (BNdim = 2) then
+  PA := PSingleArray(A.RawData(Arena));
+  PB := PSingleArray(B.RawData(Arena));
+  POut := PSingleArray(OutT.RawData(Arena));
+  
+  // Compute batch size (product of all dims except last 2)
+  BatchSize := 1;
+  for i := 0 to ANdim - 3 do
+    BatchSize := BatchSize * A.Shape[i];
+  
+  MatrixSizeA := ARows * ACols;
+  MatrixSizeB := BRows * BCols;
+  MatrixSizeOut := ARows * BCols;
+  
+  // Save arena state for cleanup
+  SavePoint := Arena.GetSavePoint;
+  
+  // Allocate temp for B transpose (one matrix at a time)
+  TempPtr := Arena.Alloc(BRows * BCols);
+  PBT := PSingleArray(Arena.GetPtr(TempPtr));
+  
+  // Process each batch
+  for BatchIdx := 0 to BatchSize - 1 do
   begin
-    PA := PSingleArray(A.RawData(Arena));
-    PB := PSingleArray(B.RawData(Arena));
-    POut := PSingleArray(OutT.RawData(Arena));
+    PABatch := @PA^[BatchIdx * MatrixSizeA];
+    PBBatch := @PB^[BatchIdx * MatrixSizeB];
+    POutBatch := @POut^[BatchIdx * MatrixSizeOut];
     
-    // Save arena state for cleanup
-    SavePoint := Arena.GetSavePoint;
+    // Transpose B for cache-friendly access
+    TKernels.Transpose(PSingleArray(PBBatch), PBT, BRows, BCols);
     
-    // Transpose B for cache-friendly sequential access
-    TempPtr := Arena.Alloc(BRows * BCols);
-    PBT := PSingleArray(Arena.GetPtr(TempPtr));
-    TKernels.Transpose(PB, PBT, BRows, BCols);
-    
-    // Parallel MatMul: each row of A dot-products with all columns of B
+    // Parallel MatMul for this batch: each row of A dot-products with all columns of B
     TMLParallel.ForEach(0, ARows - 1,
       procedure(RowA: Integer)
       var
         ColB: Integer;
         PtrA, PtrBT: PSingle;
       begin
-        PtrA := @PA^[RowA * ACols];
+        PtrA := @PSingleArray(PABatch)^[RowA * ACols];
         for ColB := 0 to BCols - 1 do
         begin
           PtrBT := @PBT^[ColB * BRows];
-          POut^[RowA * BCols + ColB] := TKernels.DotProduct(PtrA, PtrBT, ACols);
+          PSingleArray(POutBatch)^[RowA * BCols + ColB] := TKernels.DotProduct(PtrA, PtrBT, ACols);
         end;
       end);
-      
-    // Free temporary memory
-    Arena.Restore(SavePoint);
-  end
-  else
-    raise Exception.Create('MatMul: Batched N-D tensors (3D+) not yet implemented');
+  end;
+  
+  // Free temporary memory
+  Arena.Restore(SavePoint);
 end;
 
 class procedure TOps.Add(Arena: TArena; const A, B: TTensor; var OutT: TTensor);
 var
-  Count: Integer;
+  PA, PB, POut: PSingleArray;
+  i, OutCount, IdxA, IdxB: Integer;
 begin
-  if not A.SameShape(B) then
-    raise Exception.Create('Add: Shape mismatch');
-    
-  Count := A.ElementCount;
-  if Count = 0 then Exit;
-  TKernels.VectorAdd(A.RawData(Arena), B.RawData(Arena), OutT.RawData(Arena), Count);
+  OutCount := OutT.ElementCount;
+  if OutCount = 0 then Exit;
+  
+  PA := PSingleArray(A.RawData(Arena));
+  PB := PSingleArray(B.RawData(Arena));
+  POut := PSingleArray(OutT.RawData(Arena));
+  
+  // Fast path: same shape, no broadcasting needed
+  if A.SameShape(B) then
+  begin
+    TKernels.VectorAdd(A.RawData(Arena), B.RawData(Arena), OutT.RawData(Arena), OutCount);
+  end
+  else
+  begin
+    // Broadcasting path: compute indices for each output element
+    for i := 0 to OutCount - 1 do
+    begin
+      IdxA := BroadcastIndex(i, OutT.Shape, A.Shape, A.Strides);
+      IdxB := BroadcastIndex(i, OutT.Shape, B.Shape, B.Strides);
+      POut^[i] := PA^[IdxA] + PB^[IdxB];
+    end;
+  end;
 end;
 
 class procedure TOps.Mul(Arena: TArena; const A, B: TTensor; var OutT: TTensor);
 var
-  Count: Integer;
+  PA, PB, POut: PSingleArray;
+  i, OutCount, IdxA, IdxB: Integer;
 begin
-  if not A.SameShape(B) then
-    raise Exception.Create('Mul: Shape mismatch');
-    
-  Count := A.ElementCount;
-  if Count = 0 then Exit;
-  TKernels.VectorMul(A.RawData(Arena), B.RawData(Arena), OutT.RawData(Arena), Count);
+  OutCount := OutT.ElementCount;
+  if OutCount = 0 then Exit;
+  
+  PA := PSingleArray(A.RawData(Arena));
+  PB := PSingleArray(B.RawData(Arena));
+  POut := PSingleArray(OutT.RawData(Arena));
+  
+  // Fast path: same shape, no broadcasting needed
+  if A.SameShape(B) then
+  begin
+    TKernels.VectorMul(A.RawData(Arena), B.RawData(Arena), OutT.RawData(Arena), OutCount);
+  end
+  else
+  begin
+    // Broadcasting path: compute indices for each output element
+    for i := 0 to OutCount - 1 do
+    begin
+      IdxA := BroadcastIndex(i, OutT.Shape, A.Shape, A.Strides);
+      IdxB := BroadcastIndex(i, OutT.Shape, B.Shape, B.Strides);
+      POut^[i] := PA^[IdxA] * PB^[IdxB];
+    end;
+  end;
 end;
 
 class procedure TOps.ReLU(Arena: TArena; const A: TTensor; var OutT: TTensor);
@@ -620,55 +668,78 @@ class procedure TOps.MatMulBackward(Arena: TArena; const A, B, OutGrad: TTensor;
 var
   PA, PB, POutGrad, PAGrad, PBGrad: PSingleArray;
   ARows, ACols, BRows, BCols: Integer;
-  i, j, k: Integer;
+  i, j, k, BatchIdx, BatchSize: Integer;
   Sum: Single;
   ANdim, BNdim: Integer;
+  MatrixSizeA, MatrixSizeB, MatrixSizeOut: Integer;
+  PABatch, PBBatch, POutGradBatch, PAGradBatch, PBGradBatch: PSingle;
 begin
   ANdim := A.NDim;
   BNdim := B.NDim;
   
-  // For now, only support 2D backward
-  if (ANdim <> 2) or (BNdim <> 2) or (OutGrad.NDim <> 2) then
-    raise Exception.Create('MatMulBackward: Batched N-D tensors (3D+) not yet implemented');
+  if ANdim < 2 then Exit;
+  if BNdim < 2 then Exit;
   
-  ARows := A.Shape[0];
-  ACols := A.Shape[1];
-  BRows := B.Shape[0];
-  BCols := B.Shape[1];
+  // Get matrix dimensions (last 2 dims)
+  ARows := A.Shape[ANdim - 2];
+  ACols := A.Shape[ANdim - 1];
+  BRows := B.Shape[BNdim - 2];
+  BCols := B.Shape[BNdim - 1];
   
   if (ARows = 0) or (ACols = 0) or (BRows = 0) or (BCols = 0) then Exit;
   if OutGrad.GradPtr < 0 then Exit;
+  
+  // Compute batch size
+  BatchSize := 1;
+  for i := 0 to ANdim - 3 do
+    BatchSize := BatchSize * A.Shape[i];
+  
+  MatrixSizeA := ARows * ACols;
+  MatrixSizeB := BRows * BCols;
+  MatrixSizeOut := ARows * BCols;
   
   PA := PSingleArray(A.RawData(Arena));
   PB := PSingleArray(B.RawData(Arena));
   POutGrad := PSingleArray(OutGrad.RawGrad(Arena));
   
-  // dA = OutGrad * B^T
-  if AGrad.RequiresGrad and (AGrad.GradPtr >= 0) then
+  // Process each batch
+  for BatchIdx := 0 to BatchSize - 1 do
   begin
-    PAGrad := PSingleArray(AGrad.RawGrad(Arena));
-    for i := 0 to ARows - 1 do
-      for j := 0 to ACols - 1 do
-      begin
-        Sum := 0;
-        for k := 0 to BCols - 1 do
-          Sum := Sum + POutGrad^[i * BCols + k] * PB^[j * BCols + k];
-        PAGrad^[i * ACols + j] := PAGrad^[i * ACols + j] + Sum;
-      end;
-  end;
-  
-  // dB = A^T * OutGrad
-  if BGrad.RequiresGrad and (BGrad.GradPtr >= 0) then
-  begin
-    PBGrad := PSingleArray(BGrad.RawGrad(Arena));
-    for i := 0 to BRows - 1 do
-      for j := 0 to BCols - 1 do
-      begin
-        Sum := 0;
-        for k := 0 to ARows - 1 do
-          Sum := Sum + PA^[k * ACols + i] * POutGrad^[k * BCols + j];
-        PBGrad^[i * BCols + j] := PBGrad^[i * BCols + j] + Sum;
-      end;
+    PABatch := @PA^[BatchIdx * MatrixSizeA];
+    PBBatch := @PB^[BatchIdx * MatrixSizeB];
+    POutGradBatch := @POutGrad^[BatchIdx * MatrixSizeOut];
+    
+    // dA = OutGrad * B^T
+    if AGrad.RequiresGrad and (AGrad.GradPtr >= 0) then
+    begin
+      PAGrad := PSingleArray(AGrad.RawGrad(Arena));
+      PAGradBatch := @PAGrad^[BatchIdx * MatrixSizeA];
+      
+      for i := 0 to ARows - 1 do
+        for j := 0 to ACols - 1 do
+        begin
+          Sum := 0;
+          for k := 0 to BCols - 1 do
+            Sum := Sum + PSingleArray(POutGradBatch)^[i * BCols + k] * PSingleArray(PBBatch)^[j * BCols + k];
+          PSingleArray(PAGradBatch)^[i * ACols + j] := PSingleArray(PAGradBatch)^[i * ACols + j] + Sum;
+        end;
+    end;
+    
+    // dB = A^T * OutGrad
+    if BGrad.RequiresGrad and (BGrad.GradPtr >= 0) then
+    begin
+      PBGrad := PSingleArray(BGrad.RawGrad(Arena));
+      PBGradBatch := @PBGrad^[BatchIdx * MatrixSizeB];
+      
+      for i := 0 to BRows - 1 do
+        for j := 0 to BCols - 1 do
+        begin
+          Sum := 0;
+          for k := 0 to ARows - 1 do
+            Sum := Sum + PSingleArray(PABatch)^[k * ACols + i] * PSingleArray(POutGradBatch)^[k * BCols + j];
+          PSingleArray(PBGradBatch)^[i * BCols + j] := PSingleArray(PBGradBatch)^[i * BCols + j] + Sum;
+        end;
+    end;
   end;
 end;
 
@@ -676,20 +747,54 @@ class procedure TOps.AddBackward(Arena: TArena; const OutGrad: TTensor;
   var AGrad, BGrad: TTensor);
 var
   POutGrad, PAGrad, PBGrad: PSingleArray;
-  i, Count: Integer;
+  i, OutCount, IdxA, IdxB: Integer;
 begin
-  Count := OutGrad.ElementCount;
-  if Count = 0 then Exit;
-  if (OutGrad.GradPtr < 0) or (AGrad.GradPtr < 0) or (BGrad.GradPtr < 0) then Exit;
+  OutCount := OutGrad.ElementCount;
+  if OutCount = 0 then Exit;
+  if OutGrad.GradPtr < 0 then Exit;
   
   POutGrad := PSingleArray(OutGrad.RawGrad(Arena));
-  PAGrad := PSingleArray(AGrad.RawGrad(Arena));
-  PBGrad := PSingleArray(BGrad.RawGrad(Arena));
   
-  for i := 0 to Count - 1 do
+  // Backward for A: accumulate gradients, handling broadcasting
+  if AGrad.GradPtr >= 0 then
   begin
-    PAGrad^[i] := PAGrad^[i] + POutGrad^[i];
-    PBGrad^[i] := PBGrad^[i] + POutGrad^[i];
+    PAGrad := PSingleArray(AGrad.RawGrad(Arena));
+    
+    // If same shape, simple copy; else sum along broadcast dims
+    if AGrad.SameShape(OutGrad) then
+    begin
+      for i := 0 to OutCount - 1 do
+        PAGrad^[i] := PAGrad^[i] + POutGrad^[i];
+    end
+    else
+    begin
+      // Broadcasting: sum gradients to correct shape
+      for i := 0 to OutCount - 1 do
+      begin
+        IdxA := BroadcastIndex(i, OutGrad.Shape, AGrad.Shape, AGrad.Strides);
+        PAGrad^[IdxA] := PAGrad^[IdxA] + POutGrad^[i];
+      end;
+    end;
+  end;
+  
+  // Backward for B: accumulate gradients, handling broadcasting
+  if BGrad.GradPtr >= 0 then
+  begin
+    PBGrad := PSingleArray(BGrad.RawGrad(Arena));
+    
+    if BGrad.SameShape(OutGrad) then
+    begin
+      for i := 0 to OutCount - 1 do
+        PBGrad^[i] := PBGrad^[i] + POutGrad^[i];
+    end
+    else
+    begin
+      for i := 0 to OutCount - 1 do
+      begin
+        IdxB := BroadcastIndex(i, OutGrad.Shape, BGrad.Shape, BGrad.Strides);
+        PBGrad^[IdxB] := PBGrad^[IdxB] + POutGrad^[i];
+      end;
+    end;
   end;
 end;
 
@@ -697,28 +802,60 @@ class procedure TOps.MulBackward(Arena: TArena; const A, B, OutGrad: TTensor;
   var AGrad, BGrad: TTensor);
 var
   PA, PB, POutGrad, PAGrad, PBGrad: PSingleArray;
-  i, Count: Integer;
+  i, OutCount, IdxA, IdxB: Integer;
 begin
-  Count := A.ElementCount;
-  if Count = 0 then Exit;
+  OutCount := OutGrad.ElementCount;
+  if OutCount = 0 then Exit;
   if OutGrad.GradPtr < 0 then Exit;
   
   PA := PSingleArray(A.RawData(Arena));
   PB := PSingleArray(B.RawData(Arena));
   POutGrad := PSingleArray(OutGrad.RawGrad(Arena));
   
+  // dA = OutGrad * B, with broadcast handling
   if AGrad.GradPtr >= 0 then
   begin
     PAGrad := PSingleArray(AGrad.RawGrad(Arena));
-    for i := 0 to Count - 1 do
-      PAGrad^[i] := PAGrad^[i] + POutGrad^[i] * PB^[i];
+    
+    if AGrad.SameShape(OutGrad) and B.SameShape(OutGrad) then
+    begin
+      // Fast path: no broadcasting
+      for i := 0 to OutCount - 1 do
+        PAGrad^[i] := PAGrad^[i] + POutGrad^[i] * PB^[i];
+    end
+    else
+    begin
+      // Broadcasting path
+      for i := 0 to OutCount - 1 do
+      begin
+        IdxA := BroadcastIndex(i, OutGrad.Shape, AGrad.Shape, AGrad.Strides);
+        IdxB := BroadcastIndex(i, OutGrad.Shape, B.Shape, B.Strides);
+        PAGrad^[IdxA] := PAGrad^[IdxA] + POutGrad^[i] * PB^[IdxB];
+      end;
+    end;
   end;
   
+  // dB = OutGrad * A, with broadcast handling
   if BGrad.GradPtr >= 0 then
   begin
     PBGrad := PSingleArray(BGrad.RawGrad(Arena));
-    for i := 0 to Count - 1 do
-      PBGrad^[i] := PBGrad^[i] + POutGrad^[i] * PA^[i];
+    
+    if BGrad.SameShape(OutGrad) and A.SameShape(OutGrad) then
+    begin
+      // Fast path: no broadcasting
+      for i := 0 to OutCount - 1 do
+        PBGrad^[i] := PBGrad^[i] + POutGrad^[i] * PA^[i];
+    end
+    else
+    begin
+      // Broadcasting path
+      for i := 0 to OutCount - 1 do
+      begin
+        IdxA := BroadcastIndex(i, OutGrad.Shape, A.Shape, A.Strides);
+        IdxB := BroadcastIndex(i, OutGrad.Shape, BGrad.Shape, BGrad.Strides);
+        PBGrad^[IdxB] := PBGrad^[IdxB] + POutGrad^[i] * PA^[IdxA];
+      end;
+    end;
   end;
 end;
 
