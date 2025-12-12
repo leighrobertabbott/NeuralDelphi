@@ -62,9 +62,16 @@ type
     // Forward pass: returns prediction probabilities [10]
     function Forward(const Input: TArray<Single>): TArray<Single>;
     
-    // Training step: returns loss
+    // Training step: returns loss (single sample, updates immediately)
     function TrainStep(const Input: TArray<Single>; const Target: TArray<Single>;
       LearningRate: Single; GradClip: Single = 5.0): Single;
+    
+    // Batch training: accumulate gradients without updating
+    function AccumulateGradient(const Input: TArray<Single>; const Target: TArray<Single>): Single;
+    // Apply accumulated gradients (call after BatchSize samples)
+    procedure ApplyGradients(LearningRate: Single; BatchSize: Integer; GradClip: Single = 5.0);
+    // Zero gradients (call at start of batch)
+    procedure ZeroGradients;
     
     // Reset parameters to random values
     procedure Reset;
@@ -170,6 +177,26 @@ begin
   Result := FGraph.GetOutputValue(FLossIdx);
 end;
 
+procedure TMNISTNetwork.ZeroGradients;
+begin
+  FGraph.ZeroGrad;
+end;
+
+function TMNISTNetwork.AccumulateGradient(const Input: TArray<Single>; const Target: TArray<Single>): Single;
+begin
+  // Forward + backward only, no weight update
+  BuildForward(Input, Target, True);
+  FGraph.Backward(FLossIdx);
+  Result := FGraph.GetOutputValue(FLossIdx);
+end;
+
+procedure TMNISTNetwork.ApplyGradients(LearningRate: Single; BatchSize: Integer; GradClip: Single);
+begin
+  // Scale learning rate by 1/BatchSize to get average gradient effect
+  // (gradients accumulate, so we divide LR to average them)
+  FGraph.Step(LearningRate / BatchSize, GradClip);
+end;
+
 procedure TMNISTNetwork.Reset;
 begin
   InitializeParams;
@@ -222,6 +249,10 @@ type
     LearningRate: Single;
     TrainSampleIdx: Integer;  // Current training sample index
     TrainShuffledIndices: TArray<Integer>;  // Shuffled indices for current epoch
+    // Batch training
+    BatchSize: Integer;
+    BatchSampleCount: Integer;  // Samples processed in current batch
+    BatchLossAccum: Single;     // Accumulated loss for current batch
     // Quick win features
     LossHistory: TList<Single>;  // Training loss history for chart
     ConfusionMatrix: array[0..9, 0..9] of Integer;  // Actual x Predicted
@@ -257,6 +288,11 @@ begin
   CurrentSampleIdx := 0;
   TrainSampleIdx := 0;
   SetLength(TrainShuffledIndices, 0);
+  
+  // Batch training settings
+  BatchSize := 32;
+  BatchSampleCount := 0;
+  BatchLossAccum := 0;
   
   // Image display (fixed position, not alTop so it doesn't overlap right panels)
   PaintBox := TPaintBox.Create(Self);
@@ -577,7 +613,11 @@ begin
     Application.ProcessMessages;
   end;
   
-  // Train on current sample
+  // Start of new batch? Zero gradients
+  if BatchSampleCount = 0 then
+    Network.ZeroGradients;
+  
+  // Train on current sample (accumulate gradient)
   var Idx := TrainShuffledIndices[TrainSampleIdx];
   
   // Convert [784] to [1, 1, 28, 28]
@@ -588,18 +628,31 @@ begin
   // One-hot encode target
   TargetOneHot := OneHotEncode(TrainData.Labels[Idx], 10);
   
-  Loss := Network.TrainStep(Input4D, TargetOneHot, LearningRate, 5.0);
+  // Accumulate gradient (no update yet)
+  Loss := Network.AccumulateGradient(Input4D, TargetOneHot);
+  BatchLossAccum := BatchLossAccum + Loss;
+  Inc(BatchSampleCount);
   
-  // Record loss for chart
-  LossHistory.Add(Loss);
+  // End of batch? Apply gradients
+  if BatchSampleCount >= BatchSize then
+  begin
+    Network.ApplyGradients(LearningRate, BatchSize, 5.0);
+    
+    // Record average loss for chart
+    LossHistory.Add(BatchLossAccum / BatchSize);
+    
+    // Reset batch counters
+    BatchSampleCount := 0;
+    BatchLossAccum := 0;
+  end;
   
-  // Update loss display periodically (this is training loss, not test loss)
+  // Update loss display periodically
   if TrainSampleIdx mod 50 = 0 then
   begin
-    LblLoss.Caption := Format('Train Loss: %.4f (Sample %d/%d)', 
-      [Loss, TrainSampleIdx + 1, SamplesToTrain]);
-    LblEpoch.Caption := Format('Epoch: %d', [EpochCount]);  // Update epoch display
-    ChartPanel.Invalidate;  // Refresh loss chart
+    LblLoss.Caption := Format('Loss: %.4f (Sample %d/%d, Batch %d)', 
+      [Loss, TrainSampleIdx + 1, SamplesToTrain, BatchSize]);
+    LblEpoch.Caption := Format('Epoch: %d', [EpochCount]);
+    ChartPanel.Invalidate;
   end;
   
   Inc(TrainSampleIdx);

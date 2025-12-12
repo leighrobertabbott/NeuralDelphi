@@ -94,6 +94,15 @@ type
     FBatchNormMomentum: TArray<Single>;
     FIsTraining: Boolean;
     
+    // MaxPool2D indices storage (per node)
+    FMaxPoolIndices: TArray<TArray<Integer>>;
+    FMaxPoolSize: TArray<Integer>;
+    FMaxPoolStride: TArray<Integer>;
+    
+    // Dropout mask storage (per node)
+    FDropoutMasks: TArray<TArray<Byte>>;
+    FDropoutRates: TArray<Single>;
+    
     // Adam optimizer state
     FAdamM: TArray<TArray<Single>>;  // Momentum (first moment)
     FAdamV: TArray<TArray<Single>>;   // Velocity (second moment)
@@ -145,6 +154,8 @@ type
     function MatMulAdd(A, B, Bias: Integer): Integer;
     function AddReLU(A, B: Integer): Integer;
     function MatMulReLU(A, B: Integer): Integer;
+    function MaxPool2D(Input: Integer; PoolSize, Stride: Integer): Integer;
+    function Dropout(Input: Integer; DropRate: Single): Integer;
     
     // Training mode control
     procedure SetTrainingMode(IsTraining: Boolean);
@@ -764,6 +775,83 @@ begin
   FConv2DStride[Result] := Stride;
 end;
 
+function TGraph.MaxPool2D(Input: Integer; PoolSize, Stride: Integer): Integer;
+var
+  Node: TNode;
+  TensorInput: TTensor;
+  Batch, Channels, InH, InW: Integer;
+  OutH, OutW: Integer;
+  OutShape: TArray<Integer>;
+begin
+  TensorInput := FNodes[Input].Result;
+  
+  if TensorInput.NDim <> 4 then
+    raise Exception.Create('MaxPool2D: Input must be 4D tensor [Batch, Channels, H, W]');
+  
+  Batch := TensorInput.Shape[0];
+  Channels := TensorInput.Shape[1];
+  InH := TensorInput.Shape[2];
+  InW := TensorInput.Shape[3];
+  
+  OutH := (InH - PoolSize) div Stride + 1;
+  OutW := (InW - PoolSize) div Stride + 1;
+  
+  if (OutH <= 0) or (OutW <= 0) then
+    raise Exception.CreateFmt('MaxPool2D: Invalid output dimensions: OutH=%d, OutW=%d', [OutH, OutW]);
+  
+  SetLength(OutShape, 4);
+  OutShape[0] := Batch;
+  OutShape[1] := Channels;
+  OutShape[2] := OutH;
+  OutShape[3] := OutW;
+  
+  Node.Op := opMaxPool2D;
+  Node.Result := TTensor.Create(FArena, OutShape, FNodes[Input].RequiresGrad);
+  Node.Parents[0] := Input;
+  Node.ParentCount := 1;
+  Node.RequiresGrad := Node.Result.RequiresGrad;
+  
+  // Ensure storage arrays are sized
+  if FNodeCount >= Length(FMaxPoolIndices) then
+  begin
+    SetLength(FMaxPoolIndices, FNodeCapacity);
+    SetLength(FMaxPoolSize, FNodeCapacity);
+    SetLength(FMaxPoolStride, FNodeCapacity);
+  end;
+  
+  TOps.MaxPool2D(FArena, TensorInput, PoolSize, Stride, Node.Result, FMaxPoolIndices[FNodeCount]);
+  
+  Result := AddNode(Node);
+  FMaxPoolSize[Result] := PoolSize;
+  FMaxPoolStride[Result] := Stride;
+end;
+
+function TGraph.Dropout(Input: Integer; DropRate: Single): Integer;
+var
+  Node: TNode;
+  TensorInput: TTensor;
+begin
+  TensorInput := FNodes[Input].Result;
+  
+  Node.Op := opDropout;
+  Node.Result := TTensor.Create(FArena, TensorInput.Shape, FNodes[Input].RequiresGrad);
+  Node.Parents[0] := Input;
+  Node.ParentCount := 1;
+  Node.RequiresGrad := Node.Result.RequiresGrad;
+  
+  // Ensure storage arrays are sized
+  if FNodeCount >= Length(FDropoutMasks) then
+  begin
+    SetLength(FDropoutMasks, FNodeCapacity);
+    SetLength(FDropoutRates, FNodeCapacity);
+  end;
+  
+  TOps.Dropout(FArena, TensorInput, DropRate, FIsTraining, Node.Result, FDropoutMasks[FNodeCount]);
+  
+  Result := AddNode(Node);
+  FDropoutRates[Result] := DropRate;
+end;
+
 function TGraph.Reshape(InputIdx: Integer; const NewShape: array of Integer): Integer;
 var
   Node: TNode;
@@ -1289,6 +1377,34 @@ begin
             
             TOps.Conv2DBackward(FArena, TensorInput, TensorWeight, OutGrad,
               Padding, Stride, InputGrad, WeightGrad);
+          end;
+        end;
+      
+      opMaxPool2D:
+        begin
+          if FNodes[Node.Parents[0]].RequiresGrad then
+          begin
+            AllocGradIfNeeded(Node.Parents[0]);
+            var InputGrad: TTensor;
+            InputGrad := FNodes[Node.Parents[0]].Result;
+            
+            // Use stored indices for gradient routing
+            if i < Length(FMaxPoolIndices) then
+              TOps.MaxPool2DBackward(FArena, OutGrad, FMaxPoolIndices[i], InputGrad);
+          end;
+        end;
+      
+      opDropout:
+        begin
+          if FNodes[Node.Parents[0]].RequiresGrad then
+          begin
+            AllocGradIfNeeded(Node.Parents[0]);
+            var InputGrad: TTensor;
+            InputGrad := FNodes[Node.Parents[0]].Result;
+            
+            // Use stored mask and rate for gradient
+            if i < Length(FDropoutMasks) then
+              TOps.DropoutBackward(FArena, OutGrad, FDropoutMasks[i], FDropoutRates[i], InputGrad);
           end;
         end;
       
