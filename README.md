@@ -13,13 +13,15 @@
 ## ✨ Features
 
 - **🚀 Arena-Based Memory** — Zero allocation/deallocation during training
-- **⚡ SIMD Assembly** — Hand-tuned SSE kernels for x64
+- **⚡ SIMD Assembly** — AVX-512 and SSE kernels with CPUID auto-detection
 - **🔄 Automatic Differentiation** — Full autograd with computation graphs
 - **🧵 Thread Pool Parallelization** — Efficient multi-core utilization
 - **📦 Zero Dependencies** — Pure Delphi, compiles standalone
 - **🎛️ N-Dimensional Tensors** — Full Shape/Strides support for any dimensionality
 - **📡 Broadcasting** — NumPy-style automatic shape broadcasting
 - **🔢 Batch Operations** — Batched matrix multiplication for 3D+ tensors
+- **📊 Training Visualization** — Live loss charts and confusion matrices
+- **💾 Model Persistence** — Save/Load trained models to disk
 
 ## 🏗️ Architecture
 
@@ -185,11 +187,9 @@ Graph.Backward(LossNode);  // Computes gradients for all nodes requiring them
 
 ## 🎯 XOR Demo
 
-The included demo (`XOR_Demo.dpr`) trains a neural network to learn the XOR function with a **real-time visual heatmap** and **interactive control panel**.
+The included demo (`XOR_Demo.dpr`) trains a neural network to learn the XOR function with a **real-time visual heatmap**, **live loss chart**, and **interactive control panel**.
 
 ### Interactive Controls
-
-The demo includes a control panel for experimenting with hyperparameters:
 
 | Control | Default | Description |
 |---------|---------|-------------|
@@ -198,11 +198,13 @@ The demo includes a control panel for experimenting with hyperparameters:
 | **Grad Clip** | 5.0 | Maximum gradient magnitude. Prevents exploding gradients |
 | **Start/Stop** | — | Toggle training on/off |
 | **Reset Network** | — | Reinitialize with random weights |
+| **Save/Load Model** | — | Persist trained weights to disk |
+| **Loss Chart** | — | Live visualization of training loss |
 
 **Tips:**
 - Learning rate 0.5-1.0 works well for XOR
 - 8-32 hidden neurons is plenty
-- Watch the loss decrease and decision boundary sharpen in real-time
+- Watch the loss chart flatten as the network converges
 
 ### The XOR Problem
 
@@ -243,15 +245,36 @@ Where H = Hidden Neurons (configurable via UI)
 
 > **Note:** 32-bit builds use scalar fallbacks (no SIMD)
 
+## 🎯 MNIST Demo
+
+The `MNIST_Demo.dpr` demonstrates training a CNN on handwritten digits with **live training visualization**.
+
+### Features
+- **Conv2D layers** with im2col + GEMM optimization
+- **Live loss chart** showing training progress
+- **Confusion matrix** visualizing classification errors
+- **Save/Load** trained models
+- **Bulk data loading** for fast dataset initialization
+
+### Network Architecture
+```
+Input[1,28,28] → Conv1(16ch, 3x3, stride=2) → ReLU →
+                 Conv2(32ch, 3x3, stride=2) → ReLU →
+                 Flatten → Dense(128) → ReLU →
+                 Dense(10) → Softmax → Output
+```
+
 ## 📁 Project Structure
 
 ```
 NeuralDelphi/
 ├── ML.Arena.pas      # Memory arena allocator
 ├── ML.Tensor.pas     # N-D tensor with Shape/Strides
-├── ML.Ops.pas        # Math operations + SIMD + broadcasting
+├── ML.Ops.pas        # Math operations + SIMD + im2col Conv2D
 ├── ML.Graph.pas      # Computation graph + autograd
 ├── XOR_Demo.dpr      # Interactive XOR visualization
+├── MNIST_Demo.dpr    # CNN digit classification demo
+├── MNIST_Loader.pas  # Fast MNIST dataset loader
 ├── LICENSE           # MIT License
 └── README.md
 ```
@@ -265,6 +288,9 @@ NeuralDelphi/
 | **MatMul** | Matrix multiplication `C = A @ B` | No | ✅ 3D+ |
 | **Add** | Element-wise addition `C = A + B` | ✅ | ✅ |
 | **Mul** | Element-wise multiplication `C = A * B` | ✅ | ✅ |
+| **Conv2D** | 2D Convolution (im2col + GEMM) | No | ✅ |
+| **MaxPool2D** | Max pooling with gradient routing | No | ✅ |
+| **Dropout** | Inverted dropout regularization | No | ✅ |
 
 ### Activation Functions
 
@@ -318,8 +344,10 @@ TOps.MatMul(Arena, A, B, Out);  // Parallel across batches and rows
 ## 🧠 Performance Optimizations
 
 **1. SIMD (Single Instruction, Multiple Data)**
-- Processes 4 floats simultaneously using SSE registers
-- `DotProduct`: ~4x faster than scalar code
+- **SSE**: Processes 4 floats simultaneously using SSE registers
+- **AVX-512**: Processes 16 floats simultaneously (when supported)
+- Automatic CPU feature detection with fallback chain
+- `DotProduct`: ~4x faster (SSE) or ~16x faster (AVX-512) than scalar code
 
 **2. Cache-Friendly Matrix Multiplication**
 - Transposes matrix B before multiplication
@@ -338,17 +366,27 @@ TOps.MatMul(Arena, A, B, Out);  // Parallel across batches and rows
 - Parameters allocated once, gradients pre-allocated
 - `ResetActivations()` only wipes temporary tensors
 
+**6. Model Persistence**
+- Binary format for fast save/load
+- Preserves all parameters and architecture
+- Version-compatible format for future updates
+
 ## 🚧 Roadmap
 
 - [x] N-dimensional tensor support
 - [x] Broadcasting for element-wise ops
 - [x] Batch matrix multiplication
 - [x] Interactive hyperparameter tuning
-- [ ] Model save/load persistence
-- [ ] Conv2D operations
-- [ ] MNIST demo
-- [ ] AVX-512 kernels
+- [x] Model save/load persistence
+- [x] Conv2D with im2col + GEMM optimization
+- [x] MNIST demo with live visualization
+- [x] AVX-512/SSE kernels with CPUID detection
+- [x] MaxPool2D and Dropout layers
+- [x] Loss charts and confusion matrices
+- [x] Proper Softmax Jacobian backward pass
+- [x] He weight initialization (correct fan_in)
 - [ ] GPU acceleration (CUDA/OpenCL)
+- [ ] Additional optimizers (Adam, RMSprop)
 
 ## 🤝 Contributing
 

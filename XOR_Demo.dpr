@@ -9,6 +9,7 @@ uses
   Vcl.Controls,
   Vcl.ExtCtrls,
   Vcl.StdCtrls,
+  Vcl.Dialogs,
   System.SysUtils,
   System.Generics.Collections,
   System.Classes,
@@ -180,6 +181,8 @@ type
     LblLoss: TLabel;
     BtnStartStop: TButton;
     BtnReset: TButton;
+    BtnSave: TButton;
+    BtnLoad: TButton;
     // Hyperparameter controls
     LblLR: TLabel;
     EditLR: TEdit;
@@ -188,6 +191,7 @@ type
     LblGradClip: TLabel;
     EditGradClip: TEdit;
     PanelControls: TPanel;
+    ChartPanel: TPaintBox;
     constructor Create(AOwner: TComponent); override;
     procedure FormCreate(Sender: TObject);
     procedure FormDestroy(Sender: TObject);
@@ -195,16 +199,22 @@ type
     procedure PaintBoxPaint(Sender: TObject);
     procedure BtnStartStopClick(Sender: TObject);
     procedure BtnResetClick(Sender: TObject);
+    procedure BtnSaveClick(Sender: TObject);
+    procedure BtnLoadClick(Sender: TObject);
+    procedure ChartPanelPaint(Sender: TObject);
   private
     Network: TNetwork;
-    X: array[0..3] of TArray<Single>;
-    Targets: array[0..3] of Single;
+    TrainX: TArray<TArray<Single>>;
+    TrainY: TArray<Single>;
+    NumSamples: Integer;
     EpochCount: Integer;
     Buffer: TBitmap;
     IsTraining: Boolean;
     LearningRate: Single;
     HiddenSize: Integer;
     GradClip: Single;
+    RenderCounter: Integer;  // Skip rendering on most timer ticks
+    LossHistory: TList<Single>;  // Loss history for chart
     procedure PrepareData;
     procedure TrainEpoch;
     procedure RenderBrain;
@@ -224,7 +234,7 @@ end;
 procedure TMainForm.FormCreate(Sender: TObject);
 begin
   ClientWidth := 500;
-  ClientHeight := 650;
+  ClientHeight := 680;  // Taller to fit loss chart at bottom
   Position := poScreenCenter;
   Caption := 'NeuralDelphi - XOR Demo';
   DoubleBuffered := True;
@@ -327,14 +337,45 @@ begin
   BtnReset.Caption := 'Reset Network';
   BtnReset.OnClick := BtnResetClick;
 
+  // Save Button
+  BtnSave := TButton.Create(Self);
+  BtnSave.Parent := PanelControls;
+  BtnSave.Left := 270;
+  BtnSave.Top := 80;
+  BtnSave.Width := 100;
+  BtnSave.Height := 35;
+  BtnSave.Caption := 'Save Model';
+  BtnSave.OnClick := BtnSaveClick;
+
+  // Load Button
+  BtnLoad := TButton.Create(Self);
+  BtnLoad.Parent := PanelControls;
+  BtnLoad.Left := 380;
+  BtnLoad.Top := 80;
+  BtnLoad.Width := 100;
+  BtnLoad.Height := 35;
+  BtnLoad.Caption := 'Load Model';
+  BtnLoad.OnClick := BtnLoadClick;
+
   Timer := TTimer.Create(Self);
   Timer.Interval := 10;
   Timer.OnTimer := TimerTimer;
   Timer.Enabled := False;  // Start disabled
 
   Buffer := TBitmap.Create;
-  Buffer.SetSize(50, 50);
+  Buffer.SetSize(40, 40);  // Balanced: faster than 50x50, smoother than 25x25
   Buffer.PixelFormat := pf32bit;
+  RenderCounter := 0;
+
+  // Loss history chart (at bottom of window)
+  LossHistory := TList<Single>.Create;
+  ChartPanel := TPaintBox.Create(Self);
+  ChartPanel.Parent := Self;
+  ChartPanel.Left := 10;
+  ChartPanel.Top := 590;
+  ChartPanel.Width := 480;
+  ChartPanel.Height := 80;
+  ChartPanel.OnPaint := ChartPanelPaint;
 
   PrepareData;
   RenderBrain;  // Initial render
@@ -344,15 +385,37 @@ procedure TMainForm.PrepareData;
 begin
   Randomize;
   
-  // XOR dataset: 4 samples
-  X[0] := [0.0, 0.0];
-  Targets[0] := 0.0;
-  X[1] := [0.0, 1.0];
-  Targets[1] := 1.0;
-  X[2] := [1.0, 0.0];
-  Targets[2] := 1.0;
-  X[3] := [1.0, 1.0];
-  Targets[3] := 0.0;
+  // Expanded XOR dataset with interpolated points for better generalization
+  // This helps the network learn the classic "X" pattern
+  NumSamples := 16;
+  SetLength(TrainX, NumSamples);
+  SetLength(TrainY, NumSamples);
+  
+  // Original 4 corners
+  TrainX[0] := [0.0, 0.0];  TrainY[0] := 0.0;  // Red corner
+  TrainX[1] := [0.0, 1.0];  TrainY[1] := 1.0;  // Blue corner
+  TrainX[2] := [1.0, 0.0];  TrainY[2] := 1.0;  // Blue corner
+  TrainX[3] := [1.0, 1.0];  TrainY[3] := 0.0;  // Red corner
+  
+  // Points along the "0" diagonal (top-left to bottom-right) - should be RED (0)
+  TrainX[4] := [0.25, 0.25];  TrainY[4] := 0.0;
+  TrainX[5] := [0.5, 0.5];    TrainY[5] := 0.0;  // Center
+  TrainX[6] := [0.75, 0.75];  TrainY[6] := 0.0;
+  
+  // Points along the "1" diagonal (top-right to bottom-left) - should be BLUE (1)
+  TrainX[7] := [0.75, 0.25];  TrainY[7] := 1.0;
+  TrainX[8] := [0.25, 0.75];  TrainY[8] := 1.0;
+  
+  // Additional points in the quadrants
+  TrainX[9] := [0.1, 0.1];    TrainY[9] := 0.0;   // Near (0,0)
+  TrainX[10] := [0.9, 0.9];   TrainY[10] := 0.0;  // Near (1,1)
+  TrainX[11] := [0.1, 0.9];   TrainY[11] := 1.0;  // Near (0,1)
+  TrainX[12] := [0.9, 0.1];   TrainY[12] := 1.0;  // Near (1,0)
+  
+  // Edge midpoints
+  TrainX[13] := [0.0, 0.5];   TrainY[13] := 0.5;  // Left edge - ambiguous
+  TrainX[14] := [1.0, 0.5];   TrainY[14] := 0.5;  // Right edge - ambiguous
+  TrainX[15] := [0.5, 0.0];   TrainY[15] := 0.5;  // Top edge - ambiguous
   
   CreateNetwork;
 end;
@@ -449,19 +512,91 @@ begin
   RenderBrain;
   PaintBox.Invalidate;
   
-  LblEpoch.Caption := 'Epoch: 0';
-  LblLoss.Caption := 'Loss: (reset)';
-  Caption := 'NeuralDelphi - XOR Demo (Reset)';
-  
-  // Resume if was training
+  // Restart training if it was running
   if WasTraining then
   begin
     IsTraining := True;
     Timer.Enabled := True;
-    Caption := 'NeuralDelphi - XOR Demo (Training...)';
   end;
   
   UpdateButtonState;
+end;
+
+procedure TMainForm.BtnSaveClick(Sender: TObject);
+var
+  SaveDialog: TSaveDialog;
+begin
+  if Network = nil then
+  begin
+    ShowMessage('No network to save');
+    Exit;
+  end;
+  
+  SaveDialog := TSaveDialog.Create(Self);
+  try
+    SaveDialog.Filter := 'NeuralDelphi Model (*.ndml)|*.ndml|All Files (*.*)|*.*';
+    SaveDialog.DefaultExt := 'ndml';
+    SaveDialog.FileName := 'xor_model.ndml';
+    if SaveDialog.Execute then
+    begin
+      try
+        Network.Graph.SaveModel(SaveDialog.FileName);
+        ShowMessage('Model saved successfully');
+      except
+        on E: Exception do
+          ShowMessage('Error saving model: ' + E.Message);
+      end;
+    end;
+  finally
+    SaveDialog.Free;
+  end;
+end;
+
+procedure TMainForm.BtnLoadClick(Sender: TObject);
+var
+  OpenDialog: TOpenDialog;
+  PredBefore, PredAfter: Single;
+  TestInput: TArray<Single>;
+begin
+  if Network = nil then
+  begin
+    ShowMessage('Network not initialized');
+    Exit;
+  end;
+  
+  OpenDialog := TOpenDialog.Create(Self);
+  try
+    OpenDialog.Filter := 'NeuralDelphi Model (*.ndml)|*.ndml|All Files (*.*)|*.*';
+    OpenDialog.DefaultExt := 'ndml';
+    if OpenDialog.Execute then
+    begin
+      try
+        // Test prediction before loading
+        TestInput := [0.0, 1.0];
+        PredBefore := Network.Forward(TestInput);
+        
+        // Load model
+        Network.Graph.LoadModel(OpenDialog.FileName);
+        
+        // Test prediction after loading
+        PredAfter := Network.Forward(TestInput);
+        
+        // Verify predictions match (they should if model was saved correctly)
+        ShowMessageFmt('Model loaded successfully'#13#10 +
+          'Prediction before load: %.6f'#13#10 +
+          'Prediction after load: %.6f'#13#10 +
+          'Difference: %.6f',
+          [PredBefore, PredAfter, Abs(PredBefore - PredAfter)]);
+        
+        RenderBrain;
+      except
+        on E: Exception do
+          ShowMessage('Error loading model: ' + E.Message);
+      end;
+    end;
+  finally
+    OpenDialog.Free;
+  end;
 end;
 
 procedure TMainForm.TimerTimer(Sender: TObject);
@@ -470,32 +605,64 @@ var
 begin
   for i := 1 to 10 do
     TrainEpoch;
-  RenderBrain;
-  PaintBox.Invalidate;
+  
+  // Render less frequently for better performance
+  Inc(RenderCounter);
+  if RenderCounter mod 5 = 0 then  // Render every 50 epochs instead of every 10
+  begin
+    RenderBrain;
+    PaintBox.Invalidate;
+  end;
 end;
 
 procedure TMainForm.TrainEpoch;
 var
-  i: Integer;
+  i, j, SwapIdx: Integer;
   TotalLoss, Loss: Single;
   Pred: array[0..3] of Single;
+  TempX: TArray<Single>;
+  TempY: Single;
+  Indices: TArray<Integer>;
 begin
   TotalLoss := 0;
-  for i := 0 to 3 do
+  
+  // Shuffle training samples to break deterministic order
+  // This helps escape local minima and find different solutions
+  SetLength(Indices, NumSamples);
+  for i := 0 to NumSamples - 1 do
+    Indices[i] := i;
+  
+  // Fisher-Yates shuffle
+  for i := NumSamples - 1 downto 1 do
   begin
-    Loss := Network.TrainStep(X[i], Targets[i], LearningRate, GradClip);
+    SwapIdx := Random(i + 1);
+    // Swap indices
+    j := Indices[i];
+    Indices[i] := Indices[SwapIdx];
+    Indices[SwapIdx] := j;
+  end;
+  
+  // Train on shuffled samples
+  for i := 0 to NumSamples - 1 do
+  begin
+    Loss := Network.TrainStep(TrainX[Indices[i]], TrainY[Indices[i]], LearningRate, GradClip);
     TotalLoss := TotalLoss + Loss;
   end;
   Inc(EpochCount);
   
-  // Debug: check what network predicts for each corner
+  // Debug: check what network predicts for the 4 corners
   for i := 0 to 3 do
-    Pred[i] := Network.Forward(X[i]);
+    Pred[i] := Network.Forward(TrainX[i]);
   
   LblEpoch.Caption := 'Epoch: ' + IntToStr(EpochCount);
   // Show predictions in loss label for debugging
   LblLoss.Caption := Format('L:%.4f [%.2f,%.2f,%.2f,%.2f]', 
-    [TotalLoss / 4, Pred[0], Pred[1], Pred[2], Pred[3]]);
+    [TotalLoss / NumSamples, Pred[0], Pred[1], Pred[2], Pred[3]]);
+  
+  // Record loss for chart
+  LossHistory.Add(TotalLoss / NumSamples);
+  if EpochCount mod 10 = 0 then
+    ChartPanel.Invalidate;
 end;
 
 procedure TMainForm.RenderBrain;
@@ -553,6 +720,60 @@ begin
     Brush.Color := clRed;
     Ellipse(460, 460, 490, 490);
     TextOut(465, 465, '0');
+  end;
+end;
+
+procedure TMainForm.ChartPanelPaint(Sender: TObject);
+var
+  Canvas: TCanvas;
+  i: Integer;
+  MaxLoss, MinLoss: Single;
+  X, Y, PrevX, PrevY: Integer;
+  ScaleX, ScaleY: Single;
+  W, H: Integer;
+begin
+  Canvas := ChartPanel.Canvas;
+  W := ChartPanel.Width;
+  H := ChartPanel.Height;
+  
+  // Background
+  Canvas.Brush.Color := clWhite;
+  Canvas.FillRect(Rect(0, 0, W, H));
+  Canvas.Pen.Color := clBlack;
+  Canvas.Rectangle(0, 0, W, H);
+  
+  Canvas.Font.Size := 7;
+  Canvas.TextOut(3, 2, 'Loss');
+  
+  if LossHistory.Count < 2 then Exit;
+  
+  // Find min/max
+  MaxLoss := LossHistory[0];
+  MinLoss := LossHistory[0];
+  for i := 1 to LossHistory.Count - 1 do
+  begin
+    if LossHistory[i] > MaxLoss then MaxLoss := LossHistory[i];
+    if LossHistory[i] < MinLoss then MinLoss := LossHistory[i];
+  end;
+  if MaxLoss <= MinLoss then MaxLoss := MinLoss + 0.1;
+  
+  ScaleX := (W - 10) / Max(1, LossHistory.Count - 1);
+  ScaleY := (H - 20) / (MaxLoss - MinLoss);
+  
+  Canvas.Pen.Color := clBlue;
+  Canvas.Pen.Width := 1;
+  
+  PrevX := 5;
+  PrevY := H - 10 - Round((LossHistory[0] - MinLoss) * ScaleY);
+  
+  for i := 1 to LossHistory.Count - 1 do
+  begin
+    X := 5 + Round(i * ScaleX);
+    Y := H - 10 - Round((LossHistory[i] - MinLoss) * ScaleY);
+    Canvas.MoveTo(PrevX, PrevY);
+    Canvas.LineTo(X, Y);
+    PrevX := X;
+    PrevY := Y;
   end;
 end;
 

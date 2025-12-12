@@ -1,15 +1,15 @@
 ﻿<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
     <PropertyGroup>
-        <ProjectGuid>{05486312-8758-428A-B670-0F97C103F047}</ProjectGuid>
+        <ProjectGuid>{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}</ProjectGuid>
         <ProjectVersion>20.1</ProjectVersion>
         <FrameworkType>VCL</FrameworkType>
         <Base>True</Base>
         <Config Condition="'$(Config)'==''">Debug</Config>
         <Platform Condition="'$(Platform)'==''">Win64</Platform>
-        <ProjectName Condition="'$(ProjectName)'==''">XOR_Demo</ProjectName>
+        <ProjectName Condition="'$(ProjectName)'==''">MNIST_Demo</ProjectName>
         <TargetedPlatforms>3</TargetedPlatforms>
         <AppType>Application</AppType>
-        <MainSource>XOR_Demo.dpr</MainSource>
+        <MainSource>MNIST_Demo.dpr</MainSource>
     </PropertyGroup>
     <PropertyGroup Condition="'$(Config)'=='Base' or '$(Base)'!=''">
         <Base>true</Base>
@@ -70,7 +70,7 @@
         <Icon_MainIcon>$(BDS)\bin\delphi_PROJECTICON.ico</Icon_MainIcon>
         <UWP_DelphiLogo44>$(BDS)\bin\Artwork\Windows\UWP\delphi_UwpDefault_44.png</UWP_DelphiLogo44>
         <UWP_DelphiLogo150>$(BDS)\bin\Artwork\Windows\UWP\delphi_UwpDefault_150.png</UWP_DelphiLogo150>
-        <SanitizedProjectName>XOR_Demo</SanitizedProjectName>
+        <SanitizedProjectName>MNIST_Demo</SanitizedProjectName>
     </PropertyGroup>
     <PropertyGroup Condition="'$(Base_Win32)'!=''">
         <DCC_UsePackage>vclwinx;fmx;vclie;DbxCommonDriver;bindengine;IndyIPCommon;VCLRESTComponents;FireDACCommonODBC;FireDACCommonDriver;appanalytics;IndyProtocols;vclx;Skia.Package.RTL;IndyIPClient;dbxcds;vcledge;bindcompvclwinx;FmxTeeUI;bindcompfmx;inetdb;ibmonitor;FireDACSqliteDriver;DbxClientDriver;Tee;soapmidas;vclactnband;TeeUI;fmxFireDAC;dbexpress;DBXMySQLDriver;VclSmp;inet;vcltouch;fmxase;dbrtl;Skia.Package.FMX;fmxdae;TeeDB;FireDACMSAccDriver;CustomIPTransport;vcldsnap;DBXInterBaseDriver;IndySystem;Skia.Package.VCL;vcldb;ibxbindings;vclFireDAC;bindcomp;FireDACCommon;IndyCore;RESTBackendComponents;bindcompdbx;rtl;FireDACMySQLDriver;FireDACADSDriver;RESTComponents;DBXSqliteDriver;vcl;IndyIPServer;dsnapxml;dsnapcon;adortl;vclimg;FireDACPgDriver;FireDAC;inetdbxpress;xmlrtl;tethering;ibxpress;bindcompvcl;dsnap;CloudService;vclib;fmxobj;bindcompvclsmp;FMXTee;soaprtl;soapserver;FireDACIBDriver;$(DCC_UsePackage)</DCC_UsePackage>
@@ -141,13 +141,13 @@
         <BorlandProject>
             <Delphi.Personality>
                 <Source>
-                    <Source Name="MainSource">XOR_Demo.dpr</Source>
+                    <Source Name="MainSource">MNIST_Demo.dpr</Source>
                 </Source>
             </Delphi.Personality>
             <Deployment Version="4">
-                <DeployFile LocalName="Win32\Debug\XOR_Demo.exe" Configuration="Debug" Class="ProjectOutput">
+                <DeployFile LocalName="Win32\Debug\MNIST_Demo.exe" Configuration="Debug" Class="ProjectOutput">
                     <Platform Name="Win32">
-                        <RemoteName>XOR_Demo.exe</RemoteName>
+                        <RemoteName>MNIST_Demo.exe</RemoteName>
                         <Overwrite>true</Overwrite>
                     </Platform>
                 </DeployFile>
